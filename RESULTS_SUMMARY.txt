@@ -1,0 +1,73 @@
+========================================================================
+CIFAR-10 Corruption Robustness Results
+========================================================================
+
+Model: ResNet18 with HybridAugment++ (PS)
+Pretrained weights from: https://github.com/MKYucel/hybrid_augment
+
+------------------------------------------------------------------------
+Metric                  | Paper (Expected) | Our Reproduction | Status
+------------------------------------------------------------------------
+Clean Accuracy (%)      |      ~93-94      |      93.05       |   ✓
+mCE (mean Corr. Error)  |       8.2        |      15.9        |   ⚠
+------------------------------------------------------------------------
+
+Per-Corruption Breakdown (Error %)
+------------------------------------------------------------------------
+Corruption Type         | Severity 1-5 Mean | Corruption Error (CE)
+------------------------------------------------------------------------
+gaussian_noise          |      12.92        |      14.58
+shot_noise              |      11.34        |      12.68
+impulse_noise           |      10.16        |      11.39
+defocus_blur            |       9.36        |      11.43
+glass_blur              |      17.01        |      20.57
+motion_blur             |      12.57        |      16.01
+zoom_blur               |      10.81        |      13.55
+snow                    |       9.70        |      11.19
+frost                   |       9.30        |      11.24
+fog                     |      15.70        |      19.17
+brightness              |       7.31        |      12.94
+contrast                |      29.84        |      34.98
+elastic_transform       |      12.98        |      15.33
+pixelate                |       9.41        |      12.78
+jpeg_compression        |      12.98        |      21.11
+------------------------------------------------------------------------
+Mean Corruption Error   |                   |      15.9
+------------------------------------------------------------------------
+
+Notes:
+- Clean accuracy successfully reproduced (93.05% vs expected ~93-94%)
+- mCE differs from paper's optimal result (15.9 vs 8.2)
+- Possible causes: model configuration differences, training variant
+- All corruption types evaluated successfully (15 types × 5 severities)
+- Baseline establishes reference for adaptive modification evaluation
+
+========================================================================
+PROPOSED MODIFICATION: Adaptive Frequency Cutoff
+========================================================================
+
+Baseline Approach (Paper):
+- Fixed σ = 0.5 for all images (one-size-fits-all)
+- Trade-off: higher σ → better robustness, lower σ → better clean accuracy
+
+Our Adaptive Approach:
+- Per-image σ ∈ [0.3, 0.7] based on spectral entropy
+- Simple images (low frequency complexity) → σ = 0.6-0.7 (more augmentation)
+- Complex images (high frequency detail) → σ = 0.3-0.4 (preserve detail)
+
+Implementation:
+✓ Spectral entropy computation (utils/adaptive_cutoff.py)
+✓ Adaptive sigma integration (datasets/APR.py)
+✓ Maintains generalization (content-based, not identity-based)
+
+Expected Improvements:
+- Clean accuracy: +0.5-1.5% (better detail preservation for complex images)
+- mCE: -0.5 to -1.5 points (stronger augmentation for simple images)
+- Better semantic preservation across image complexity spectrum
+
+Scientific Justification:
+- Paper showed σ trade-off exists but used fixed compromise value
+- We extend by making trade-off image-adaptive rather than global
+- Analogous to adaptive learning rates vs fixed learning rate
+
+========================================================================

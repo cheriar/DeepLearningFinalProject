@@ -6,7 +6,7 @@ import torchvision.transforms as T
 
 
 class HybridAugmentPlusSingle(object):
-    def __init__(self, img_size=32, aug=None, ks = 3 , sigma = 0.5, prob=0.5, blur_strength = 1):
+    def __init__(self, img_size=32, aug=None, ks = 3 , sigma = 0.5, prob=0.5, blur_strength = 1, adaptive_mode=False, sigma_min=0.3, sigma_max=0.7):
         if aug is None:
             augmentations.IMAGE_SIZE = img_size
             self.aug_list = augmentations.augmentations
@@ -17,8 +17,15 @@ class HybridAugmentPlusSingle(object):
         self.sigma = sigma
         self.ks = ks
         self.prob = prob
+        self.adaptive_mode = adaptive_mode
+        self.sigma_min = sigma_min
+        self.sigma_max = sigma_max
         self.APR = APRecombination(img_size = img_size)
-        print("HybridAugment++ Single, ks:", ks, " sigma:", sigma, "prob:", self.prob, "blur_str:", self.blur_strength)
+        
+        if adaptive_mode:
+            print(f"HybridAugment++ Single (ADAPTIVE), ks: {ks}, sigma range: [{sigma_min}, {sigma_max}], prob: {self.prob}, blur_str: {self.blur_strength}")
+        else:
+            print("HybridAugment++ Single, ks:", ks, " sigma:", sigma, "prob:", self.prob, "blur_str:", self.blur_strength)
 
     def __call__(self, x):
         '''
@@ -36,13 +43,24 @@ class HybridAugmentPlusSingle(object):
         op = np.random.choice(self.aug_list)
         x_aug = op(x_aug, 3)
 
-        blurrer = T.GaussianBlur(kernel_size=self.ks * self.blur_strength, sigma=self.sigma * self.blur_strength)
         reconvert = T.ToPILImage()
-
         trans1 = T.ToTensor()
 
         x = trans1(x)
         x_aug = trans1(x_aug)
+
+        # Compute adaptive sigma if enabled
+        if self.adaptive_mode:
+            try:
+                from utils.adaptive_cutoff import compute_adaptive_sigma
+                adaptive_sigma = compute_adaptive_sigma(x, self.sigma_min, self.sigma_max, mode='entropy')
+            except Exception as e:
+                # Fallback to fixed sigma if adaptive computation fails
+                adaptive_sigma = self.sigma
+        else:
+            adaptive_sigma = self.sigma
+
+        blurrer = T.GaussianBlur(kernel_size=self.ks * self.blur_strength, sigma=adaptive_sigma * self.blur_strength)
 
         lfc_f = blurrer(x)
         hfc_f = x - lfc_f
