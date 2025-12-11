@@ -25,10 +25,10 @@ np.random.seed(42)
 random.seed(42)
 
 class PerClassSigmaModule(nn.Module):
-    """Learnable sigma per class"""
-    def __init__(self, num_classes=10, init_sigma=0.5):
+    """Per-class sigma with curriculum learning"""
+    def __init__(self, num_classes=10, init_sigma=0.7):
         super().__init__()
-        # Initialize all classes to baseline sigma
+        # Start with high sigma (strong augmentation)
         self.class_sigmas = nn.Parameter(
             torch.full((num_classes,), init_sigma)
         )
@@ -36,12 +36,12 @@ class PerClassSigmaModule(nn.Module):
     def get_sigma(self, labels):
         """Get sigma for a batch of labels"""
         sigmas = self.class_sigmas[labels]
-        # Clamp to valid range [0.3, 0.7]
-        return torch.clamp(sigmas, 0.3, 0.7)
+        # Clamp to valid range [0.1, 0.7]
+        return torch.clamp(sigmas, 0.1, 0.7)
     
     def get_all_sigmas(self):
         """Get all class sigmas (for logging)"""
-        return torch.clamp(self.class_sigmas, 0.3, 0.7)
+        return torch.clamp(self.class_sigmas, 0.1, 0.7)
 
 def normalize(x):
     """CIFAR-10 normalization"""
@@ -130,11 +130,10 @@ def hybrid_augment_baseline(x, ks=3, sigma=0.5, prob=0.6):
     
     return hybrid_ims
 
-def train_epoch(model, sigma_module, train_loader, criterion, optimizer, device, use_adaptive=False):
-    """Train for one epoch"""
+def train_epoch(model, sigma_module, train_loader, criterion, optimizer_model, optimizer_sigma, device, class_correct, class_total):
+    """Train for one epoch with curriculum learning"""
     model.train()
-    if sigma_module is not None:
-        sigma_module.train()
+    sigma_module.train()
     
     total_loss = 0
     correct = 0
@@ -143,11 +142,8 @@ def train_epoch(model, sigma_module, train_loader, criterion, optimizer, device,
     for batch_idx, (data, labels) in enumerate(train_loader):
         data, labels = data.to(device), labels.to(device)
         
-        # Apply augmentation
-        if use_adaptive:
-            data_aug = hybrid_augment_adaptive(data, labels, sigma_module, ks=3, prob=0.6)
-        else:
-            data_aug = hybrid_augment_baseline(data, ks=3, sigma=0.5, prob=0.6)
+        # Apply augmentation with adaptive sigma
+        data_aug = hybrid_augment_adaptive(data, labels, sigma_module, ks=3, prob=0.6)
         
         # Normalize
         data_norm = normalize(data)
@@ -158,19 +154,27 @@ def train_epoch(model, sigma_module, train_loader, criterion, optimizer, device,
         targets = torch.cat([labels, labels], 0)
         
         # Forward pass
-        optimizer.zero_grad()
+        optimizer_model.zero_grad()
+        optimizer_sigma.zero_grad()
         outputs = model(inputs, _eval=False)
         loss = criterion(outputs, targets)
         
         # Backward pass
         loss.backward()
-        optimizer.step()
+        optimizer_model.step()
+        optimizer_sigma.step()
+        
+        # Track per-class accuracy for curriculum
+        _, predicted = outputs[:len(labels)].max(1)  # Only original images
+        for i in range(10):
+            mask = labels == i
+            class_total[i] += mask.sum().item()
+            class_correct[i] += (predicted[mask] == labels[mask]).sum().item()
         
         # Stats
         total_loss += loss.item()
-        _, predicted = outputs.max(1)
         total += targets.size(0)
-        correct += predicted.eq(targets).sum().item()
+        correct += outputs.max(1)[1].eq(targets).sum().item()
         
         if (batch_idx + 1) % 100 == 0:
             print(f'  Batch {batch_idx+1}/{len(train_loader)} | Loss: {loss.item():.4f} | Acc: {100.*correct/total:.2f}%')
@@ -236,89 +240,59 @@ def main():
     # Create models directory
     os.makedirs('trained_models', exist_ok=True)
     
-    # ========================================================================
-    # Train Baseline Model (Fixed sigma=0.5)
-    # ========================================================================
-    print("\n" + "="*70)
-    print("TRAINING BASELINE MODEL (Fixed σ=0.5)")
-    print("="*70)
-    
-    model_baseline = ResNet18(num_classes=10).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer_baseline = optim.SGD(model_baseline.parameters(), lr=lr, momentum=0.9, weight_decay=5e-4)
-    scheduler_baseline = optim.lr_scheduler.StepLR(optimizer_baseline, step_size=60, gamma=0.2)
-    
-    best_acc_baseline = 0
-    
-    for epoch in range(num_epochs):
-        print(f"\nEpoch {epoch+1}/{num_epochs}")
-        print(f"Learning rate: {scheduler_baseline.get_last_lr()[0]:.6f}")
-        
-        train_loss, train_acc = train_epoch(model_baseline, None, train_loader, criterion, optimizer_baseline, device, use_adaptive=False)
-        test_loss, test_acc = test_epoch(model_baseline, test_loader, criterion, device)
-        
-        print(f"Train - Loss: {train_loss:.4f} | Acc: {train_acc:.2f}%")
-        print(f"Test  - Loss: {test_loss:.4f} | Acc: {test_acc:.2f}%")
-        
-        scheduler_baseline.step()
-        
-        # Save best model
-        if test_acc > best_acc_baseline:
-            best_acc_baseline = test_acc
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model_baseline.state_dict(),
-                'optimizer_state_dict': optimizer_baseline.state_dict(),
-                'test_acc': test_acc,
-            }, 'trained_models/resnet18_baseline_best.pth')
-            print(f"✓ Saved best baseline model (acc: {test_acc:.2f}%)")
-    
-    # Save final baseline model
-    torch.save({
-        'epoch': num_epochs,
-        'model_state_dict': model_baseline.state_dict(),
-        'test_acc': best_acc_baseline,
-    }, 'trained_models/resnet18_baseline_final.pth')
-    
-    print(f"\n✓ Baseline training complete. Best accuracy: {best_acc_baseline:.2f}%")
     
     # ========================================================================
-    # Train Adaptive Model (Per-class learnable sigma)
+    # Train Adaptive Model with Curriculum Learning
     # ========================================================================
     print("\n" + "="*70)
-    print("TRAINING ADAPTIVE MODEL (Per-Class Learnable σ)")
+    print("TRAINING ADAPTIVE MODEL (Curriculum-Based Per-Class σ)")
     print("="*70)
     
     model_adaptive = ResNet18(num_classes=10).to(device)
-    sigma_module = PerClassSigmaModule(num_classes=10, init_sigma=0.5).to(device)
+    sigma_module = PerClassSigmaModule(num_classes=10, init_sigma=0.7).to(device)
     
-    # Optimizer for both model and sigma parameters
-    optimizer_adaptive = optim.SGD(
-        list(model_adaptive.parameters()) + list(sigma_module.parameters()),
+    # Separate optimizers: model uses weight decay, sigma doesn't
+    optimizer_model = optim.SGD(
+        model_adaptive.parameters(),
         lr=lr, momentum=0.9, weight_decay=5e-4
     )
-    scheduler_adaptive = optim.lr_scheduler.StepLR(optimizer_adaptive, step_size=60, gamma=0.2)
+    optimizer_sigma = optim.SGD(
+        sigma_module.parameters(),
+        lr=0.01, momentum=0.0, weight_decay=0.0  # Higher LR, no weight decay
+    )
+    scheduler_model = optim.lr_scheduler.StepLR(optimizer_model, step_size=60, gamma=0.2)
+    
+    # Track per-class accuracy for curriculum adjustment
+    class_correct = torch.zeros(10)
+    class_total = torch.zeros(10)
     
     best_acc_adaptive = 0
     
     for epoch in range(num_epochs):
         print(f"\nEpoch {epoch+1}/{num_epochs}")
-        print(f"Learning rate: {scheduler_adaptive.get_last_lr()[0]:.6f}")
+        print(f"Model LR: {scheduler_model.get_last_lr()[0]:.6f} | Sigma LR: 0.01")
         
-        # Log current sigma values every 10 epochs
-        if epoch % 10 == 0:
-            current_sigmas = sigma_module.get_all_sigmas().detach().cpu().numpy()
-            print("\nCurrent per-class sigma values:")
-            for i, (name, sigma) in enumerate(zip(class_names, current_sigmas)):
-                print(f"  {name:12s}: σ={sigma:.4f}")
+        # Reset per-class tracking
+        class_correct.zero_()
+        class_total.zero_()
         
-        train_loss, train_acc = train_epoch(model_adaptive, sigma_module, train_loader, criterion, optimizer_adaptive, device, use_adaptive=True)
+        train_loss, train_acc = train_epoch(model_adaptive, sigma_module, train_loader, criterion, 
+                                           optimizer_model, optimizer_sigma, device, class_correct, class_total)
         test_loss, test_acc = test_epoch(model_adaptive, test_loader, criterion, device)
         
         print(f"Train - Loss: {train_loss:.4f} | Acc: {train_acc:.2f}%")
         print(f"Test  - Loss: {test_loss:.4f} | Acc: {test_acc:.2f}%")
         
-        scheduler_adaptive.step()
+        # Log current sigma values and per-class accuracy every 10 epochs
+        if (epoch + 1) % 10 == 0:
+            current_sigmas = sigma_module.get_all_sigmas().detach().cpu().numpy()
+            class_acc = (class_correct / (class_total + 1e-10)).cpu().numpy()
+            print("\nPer-class performance and sigma:")
+            for i, name in enumerate(class_names):
+                print(f"  {name:12s}: Acc={class_acc[i]*100:5.1f}% | σ={current_sigmas[i]:.4f}")
+        
+        scheduler_model.step()
         
         # Save best model
         if test_acc > best_acc_adaptive:
@@ -327,7 +301,8 @@ def main():
                 'epoch': epoch,
                 'model_state_dict': model_adaptive.state_dict(),
                 'sigma_state_dict': sigma_module.state_dict(),
-                'optimizer_state_dict': optimizer_adaptive.state_dict(),
+                'optimizer_model_state_dict': optimizer_model.state_dict(),
+                'optimizer_sigma_state_dict': optimizer_sigma.state_dict(),
                 'test_acc': test_acc,
                 'class_sigmas': sigma_module.get_all_sigmas().detach().cpu().numpy(),
             }, 'trained_models/resnet18_adaptive_best.pth')
@@ -351,19 +326,18 @@ def main():
     print("\n" + "="*70)
     print("TRAINING COMPLETE")
     print("="*70)
-    print(f"\nBaseline Model (Fixed σ=0.5):")
-    print(f"  Best accuracy: {best_acc_baseline:.2f}%")
-    print(f"  Saved to: trained_models/resnet18_baseline_best.pth")
     
-    print(f"\nAdaptive Model (Per-Class Learnable σ):")
+    print(f"\nAdaptive Model (Curriculum-Based Per-Class σ):")
     print(f"  Best accuracy: {best_acc_adaptive:.2f}%")
     print(f"  Saved to: trained_models/resnet18_adaptive_best.pth")
     
-    print(f"\nLearned Sigma Values:")
+    print(f"\nFinal Learned Sigma Values (started at 0.7):")
     for i, (name, sigma) in enumerate(zip(class_names, final_sigmas)):
-        print(f"  {name:12s}: σ={sigma:.4f}")
+        change = sigma - 0.7
+        print(f"  {name:12s}: σ={sigma:.4f} (Δ={change:+.4f})")
     
-    print(f"\nImprovement: {best_acc_adaptive - best_acc_baseline:+.2f}%")
+    print(f"\nSigma range: [{final_sigmas.min():.4f}, {final_sigmas.max():.4f}]")
+    print(f"Sigma std: {final_sigmas.std():.4f}")
 
 if __name__ == '__main__':
     main()
