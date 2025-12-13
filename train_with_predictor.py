@@ -1,7 +1,7 @@
 """
 Training with adaptive sigma predictor network
 
-The predictor learns to map image spectral entropy → optimal sigma
+The predictor learns to map image spectral entropy -> optimal sigma
 This is trained jointly with the classification model.
 """
 import os
@@ -64,7 +64,7 @@ class SigmaPredictor(nn.Module):
     """
     Neural network that predicts optimal sigma from spectral entropy
     
-    Architecture: Simple MLP that learns the entropy → sigma mapping
+    Architecture: Simple MLP that learns the entropy -> sigma mapping
     """
     def __init__(self, hidden_dim=64):
         super().__init__()
@@ -91,7 +91,7 @@ class SigmaPredictor(nn.Module):
         # Predict sigma
         sigma_norm = self.network(entropy_norm).squeeze(1)  # [B]
         
-        # Map [0, 1] → [0.1, 0.7]
+        # Map [0, 1] -> [0.1, 0.7]
         sigma = 0.1 + 0.6 * sigma_norm
         
         return sigma
@@ -129,17 +129,16 @@ def hybrid_augment_with_predictor(x, sigma_predictor, ks=3, prob=0.6):
         ks: kernel size
         prob: probability of applying augmentation
     """
-    if random.uniform(0, 1) > prob:
-        return x
-    
     batch_size = x.size(0)
-    index = torch.randperm(batch_size).to(x.device)
     
-    # Compute spectral entropy for each image
+    # Always compute spectral entropy and sigma for stats tracking
     entropies = compute_spectral_entropy(x)
+    sigmas = sigma_predictor(entropies)
     
-    # Predict optimal sigma for each image
-    sigmas = sigma_predictor(entropies)  # [B]
+    if random.uniform(0, 1) > prob:
+        return x, sigmas, entropies
+    
+    index = torch.randperm(batch_size).to(x.device)
     
     # Apply Gaussian blur with per-image sigma
     lfc = torch.zeros_like(x)
@@ -238,7 +237,7 @@ def train_epoch(model, sigma_predictor, train_loader, criterion, optimizer_model
             if use_adaptive and len(sigma_stats) > 0:
                 avg_sigma = np.mean(sigma_stats[-100:])
                 avg_entropy = np.mean(entropy_stats[-100:])
-                print(f'  Batch {batch_idx+1}/{len(train_loader)} | Loss: {loss.item():.4f} | Acc: {100.*correct/total:.2f}% | σ_avg={avg_sigma:.3f} | H_avg={avg_entropy:.2f}')
+                print(f'  Batch {batch_idx+1}/{len(train_loader)} | Loss: {loss.item():.4f} | Acc: {100.*correct/total:.2f}% | sigma_avg={avg_sigma:.3f} | H_avg={avg_entropy:.2f}')
             else:
                 print(f'  Batch {batch_idx+1}/{len(train_loader)} | Loss: {loss.item():.4f} | Acc: {100.*correct/total:.2f}%')
     
@@ -310,7 +309,7 @@ def main():
     # Train Adaptive Model with Sigma Predictor
     # ========================================================================
     print("\n" + "="*70)
-    print("TRAINING ADAPTIVE MODEL (Spectral Entropy → Sigma Predictor)")
+    print("TRAINING ADAPTIVE MODEL (Spectral Entropy -> Sigma Predictor)")
     print("="*70)
     
     model_adaptive = ResNet18(num_classes=10).to(device)
@@ -340,7 +339,7 @@ def main():
         )
         test_loss, test_acc = test_epoch(model_adaptive, test_loader, criterion, device)
         
-        print(f"Train - Loss: {train_loss:.4f} | Acc: {train_acc:.2f}% | σ_avg={avg_sigma:.3f} | H_avg={avg_entropy:.2f}")
+        print(f"Train - Loss: {train_loss:.4f} | Acc: {train_acc:.2f}% | sigma_avg={avg_sigma:.3f} | H_avg={avg_entropy:.2f}")
         print(f"Test  - Loss: {test_loss:.4f} | Acc: {test_acc:.2f}%")
         
         scheduler_model.step()
@@ -356,7 +355,7 @@ def main():
                 'optimizer_predictor_state_dict': optimizer_predictor.state_dict(),
                 'test_acc': test_acc,
             }, 'trained_models/resnet18_adaptive_predictor_best.pth')
-            print(f"✓ Saved best adaptive model (acc: {test_acc:.2f}%)")
+            print(f"[OK] Saved best adaptive model (acc: {test_acc:.2f}%)")
     
     # Save final model
     torch.save({
@@ -366,13 +365,13 @@ def main():
         'test_acc': best_acc_adaptive,
     }, 'trained_models/resnet18_adaptive_predictor_final.pth')
     
-    print(f"\n✓ Adaptive training complete. Best accuracy: {best_acc_adaptive:.2f}%")
+    print(f"\n[OK] Adaptive training complete. Best accuracy: {best_acc_adaptive:.2f}%")
     
     # ========================================================================
     # Test predictor on sample entropies
     # ========================================================================
     print("\n" + "="*70)
-    print("LEARNED ENTROPY → SIGMA MAPPING")
+    print("LEARNED ENTROPY -> SIGMA MAPPING")
     print("="*70)
     
     sigma_predictor.eval()
@@ -380,9 +379,9 @@ def main():
     with torch.no_grad():
         predicted_sigmas = sigma_predictor(test_entropies).cpu().numpy()
     
-    print("\nEntropy → Predicted Sigma:")
+    print("\nEntropy -> Predicted Sigma:")
     for entropy, sigma in zip(test_entropies.cpu().numpy(), predicted_sigmas):
-        print(f"  H={entropy:.2f} → σ={sigma:.4f}")
+        print(f"  H={entropy:.2f} -> sigma={sigma:.4f}")
     
     # ========================================================================
     # Summary
@@ -398,7 +397,7 @@ def main():
     print(f"\nPredictor network learns:")
     print(f"  Input: Spectral entropy (frequency content measure)")
     print(f"  Output: Optimal blur sigma for that image")
-    print(f"  Range: σ ∈ [0.1, 0.7]")
+    print(f"  Range: sigma in [0.1, 0.7]")
 
 if __name__ == '__main__':
     main()
