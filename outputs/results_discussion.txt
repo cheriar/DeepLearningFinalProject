@@ -1,0 +1,10 @@
+Results and Discussion
+
+======================
+
+Baseline clean accuracy: 94.97%
+Adaptive (predictor) clean accuracy: 94.84%
+
+Saved figure: outputs\entropy_vs_sigma.png
+Saved figure: outputs\sigma_hist.png
+Saved figure: outputs\entropy_sigma_curve.png
